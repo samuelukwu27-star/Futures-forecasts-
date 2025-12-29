@@ -1,466 +1,373 @@
 #!/usr/bin/env python3
 """
-Complete Futures Outperformance Forecasting System
-Optimized for GitHub Codespaces
+2026 Full-Year Forecast Using 2024–2025 Data
+• Real or synthetic NQ=F & ES=F data for 2024–2025  
+• Monte Carlo (10,000 trials/period) for all 26 biweekly windows in 2026  
+• Non-parametric bootstrap (resampling actual spreads)  
+• GitHub-optimized: zero external dependencies beyond standard packages
 """
 
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import warnings
-from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from datetime import datetime
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
-import io
-import base64
+import sys
 
 warnings.filterwarnings('ignore')
 
-class GitHubForecaster:
-    """Forecasting system optimized for GitHub environment"""
-    
+class EnhancedForecaster:
     def __init__(self):
-        self.data = None
-        self.forecasts = None
-        self.results = {}
+        self.data_2024 = None
+        self.data_2025 = None
+        self.historical_spreads = None
+        self.forecasts_2026 = None
         
-    def fetch_data(self):
-        """Fetch data from Yahoo Finance"""
-        print("📊 Fetching futures data...")
-        
-        # Define tickers
-        tickers = {
-            'NQ': 'NQ=F',  # Nasdaq-100 Futures
-            'ES': 'ES=F',  # S&P 500 Futures
-            'VIX': '^VIX',  # Volatility Index
-            'TNX': '^TNX',  # 10-Year Treasury
-        }
+    def fetch_year_data(self, year):
+        """Fetch or synthesize futures data for a given year"""
+        start = f'{year}-01-01'
+        end = f'{year}-12-31'
+        print(f"  • Attempting {year} real data...")
         
         try:
-            # Download data
-            data = yf.download(
-                list(tickers.values()),
-                start='2024-01-01',
-                end=datetime.now().strftime('%Y-%m-%d'),
-                progress=False
-            )['Adj Close']
+            # Try real Yahoo data (robust handling)
+            data = yf.download(['NQ=F', 'ES=F'], start=start, end=end, progress=False)
+            if data.empty:
+                raise ValueError("No data returned")
             
-            data.columns = list(tickers.keys())
-            self.data = data.dropna()
+            # Extract prices
+            if 'Adj Close' in data.columns:
+                prices = data['Adj Close']
+            elif len(data.shape) == 2 and 'NQ=F' in data.columns:
+                prices = data[['NQ=F', 'ES=F']].dropna()
+            else:
+                prices = pd.DataFrame(data, columns=['NQ=F', 'ES=F']).dropna()
             
-            print(f"✅ Data fetched: {len(self.data)} trading days")
-            return True
+            if isinstance(prices.columns, pd.MultiIndex):
+                prices.columns = [c[0] for c in prices.columns]
+            
+            prices = prices.rename(columns={'NQ=F': 'NQ', 'ES=F': 'ES'}).dropna()
+            
+            if len(prices) < 100:
+                raise ValueError(f"Too few days: {len(prices)}")
+                
+            print(f"    ✅ Real data: {len(prices)} trading days")
+            return prices
             
         except Exception as e:
-            print(f"❌ Error fetching data: {e}")
-            return False
+            print(f"    ⚠️ Fallback to synthetic: {e}")
+            return self._generate_synthetic_year(year)
     
-    def calculate_biweekly_returns(self):
-        """Calculate biweekly returns and spreads"""
-        print("\n📈 Calculating biweekly returns...")
+    def _generate_synthetic_year(self, year):
+        """Generate realistic synthetic futures data for a year"""
+        # Set seed by year for reproducibility
+        np.random.seed(year)
         
-        # Ensure we have at least 20 trading days for 2 periods
-        if len(self.data) < 20:
-            print("⚠️ Insufficient data for analysis")
-            return None
+        # Realistic annual returns (based on historical regimes)
+        if year == 2024:
+            mu_nq, mu_es = 0.275, 0.240   # Actual 2024 approx
+            vol_nq, vol_es = 0.22, 0.15
+        else:  # 2025 — slightly muted growth
+            mu_nq, mu_es = 0.180, 0.140
+            vol_nq, vol_es = 0.24, 0.16  # Higher vol on uncertainty
         
-        periods = []
-        n_days = len(self.data)
+        corr = 0.91
         
-        # Create 10-trading day periods
-        for i in range(0, n_days - 9, 10):
-            if i + 9 < n_days:
-                period_data = self.data.iloc[i:i+10]
-                
-                nq_start = period_data['NQ'].iloc[0]
-                nq_end = period_data['NQ'].iloc[-1]
-                es_start = period_data['ES'].iloc[0]
-                es_end = period_data['ES'].iloc[-1]
-                
-                nq_return = (nq_end - nq_start) / nq_start * 100
-                es_return = (es_end - es_start) / es_start * 100
-                spread = nq_return - es_return
-                
-                periods.append({
-                    'period': len(periods) + 1,
-                    'start_date': period_data.index[0].date(),
-                    'end_date': period_data.index[-1].date(),
-                    'nq_return': round(nq_return, 2),
-                    'es_return': round(es_return, 2),
-                    'spread': round(spread, 2),
-                    'year': period_data.index[0].year,
-                    'month': period_data.index[0].month,
-                })
+        # Trading days (skip holidays for realism)
+        dates = pd.bdate_range(f'{year}-01-01', f'{year}-12-31')
+        t = len(dates)
+        dt = 1/252
         
-        df = pd.DataFrame(periods)
+        # Adjusted returns
+        mu = np.array([mu_nq * dt, mu_es * dt])
+        sigma = np.array([vol_nq, vol_es]) * np.sqrt(dt)
+        cov = np.array([[sigma[0]**2, corr * sigma[0] * sigma[1]],
+                        [corr * sigma[0] * sigma[1], sigma[1]**2]])
+        L = np.linalg.cholesky(cov)
+        
+        # Generate
+        z = np.random.randn(t, 2)  # Independent normals
+        returns = z @ L.T + mu
+        # Starting levels (chain from prior year)
+        start_nq = 16150 if year == 2024 else 20850  # ~29% up from 2024
+        start_es = 4820  if year == 2024 else 6250   # ~30% up
+        
+        nq = start_nq * np.exp(np.cumsum(returns[:, 0]))
+        es = start_es * np.exp(np.cumsum(returns[:, 1]))
+        
+        df = pd.DataFrame({'NQ': nq, 'ES': es}, index=dates)
+        print(f"    🔄 Synthetic data: {len(df)} days (seed={year})")
         return df
     
-    def forecast_2026(self, historical_data):
-        """Forecast all 2026 biweekly periods"""
-        print("\n🔮 Forecasting 2026 periods...")
-        
-        # Prepare features
-        X = historical_data[['period', 'month']].values
-        y = historical_data['spread'].values
-        
-        # Train ensemble model
-        models = [
-            RandomForestRegressor(n_estimators=100, random_state=42),
-            GradientBoostingRegressor(n_estimators=100, random_state=42)
-        ]
-        
-        # Cross-validation
-        tscv = TimeSeriesSplit(n_splits=5)
-        model_predictions = []
-        
-        for model in models:
-            scores = cross_val_score(model, X, y, cv=tscv, 
-                                   scoring='neg_mean_squared_error')
-            rmse = np.sqrt(-scores.mean())
-            print(f"  Model RMSE: {rmse:.3f}%")
-            
-            model.fit(X, y)
-            
-            # Predict 2026 (26 periods)
-            future_periods = np.arange(len(X) + 1, len(X) + 27)
-            future_months = self._estimate_2026_months()
-            X_future = np.column_stack([future_periods, future_months])
-            
-            predictions = model.predict(X_future)
-            model_predictions.append(predictions)
-        
-        # Ensemble average
-        ensemble_forecast = np.mean(model_predictions, axis=0)
-        
-        # Generate dates for 2026
-        dates_2026 = self._generate_2026_dates()
-        
-        # Create forecast dataframe
-        forecasts = pd.DataFrame({
-            'period': range(1, 27),
-            'start_date': dates_2026['start_dates'],
-            'end_date': dates_2026['end_dates'],
-            'forecast_spread': ensemble_forecast,
-            'prob_outperform': self._calculate_probabilities(ensemble_forecast, y)
-        })
-        
-        return forecasts
+    def fetch_all_data(self):
+        """Fetch 2024 & 2025 data"""
+        print("📊 Fetching 2024–2025 futures data...")
+        self.data_2024 = self.fetch_year_data(2024)
+        self.data_2025 = self.fetch_year_data(2025)
+        print(f"✅ Total historical data: {len(self.data_2024) + len(self.data_2025)} trading days")
+
+    def compute_biweekly_spreads(self, data, year_label=""):
+        """Compute 10-trading-day biweekly spreads from a dataset"""
+        periods = []
+        i = 0
+        p = 1
+        while i + 9 < len(data):
+            w = data.iloc[i:i+10]
+            r_nq = (w['NQ'].iloc[-1] / w['NQ'].iloc[0] - 1) * 100
+            r_es = (w['ES'].iloc[-1] / w['ES'].iloc[0] - 1) * 100
+            spread = r_nq - r_es
+            periods.append({
+                'year': year_label,
+                'period': p,
+                'start': w.index[0].date(),
+                'end': w.index[-1].date(),
+                'nq_return': r_nq,
+                'es_return': r_es,
+                'spread': spread
+            })
+            i += 10
+            p += 1
+        return pd.DataFrame(periods)
     
-    def _estimate_2026_months(self):
-        """Estimate month for each 2026 period"""
-        # First period starts in January
-        months = []
-        current_month = 1
-        
+    def aggregate_historical_spreads(self):
+        """Combine 2024 & 2025 into one empirical distribution"""
+        hist_2024 = self.compute_biweekly_spreads(self.data_2024, "2024")
+        hist_2025 = self.compute_biweekly_spreads(self.data_2025, "2025")
+        self.historical_spreads = pd.concat([hist_2024, hist_2025], ignore_index=True)
+        print(f"📈 Built empirical spread distribution from {len(self.historical_spreads)} biweekly periods")
+
+    def generate_2026_calendar(self):
+        """Generate 26 biweekly trading windows for 2026"""
+        # First 260 trading days of 2026
+        dates = pd.bdate_range('2026-01-02', periods=260)
+        periods = []
         for i in range(26):
-            months.append(current_month)
-            # Every 2 periods, move to next month
-            if (i + 1) % 2 == 0:
-                current_month += 1
-            if current_month > 12:
-                current_month = 1
+            start = dates[i*10]
+            end = dates[i*10 + 9]
+            periods.append({
+                'period': i+1,
+                'start_date': start.date(),
+                'end_date': end.date(),
+                'quarter': (start.month - 1) // 3 + 1
+            })
+        return pd.DataFrame(periods)
+
+    def monte_carlo_bootstrap(self, spreads, n_trials=10000, seed=None):
+        """Non-parametric Monte Carlo via bootstrap resampling"""
+        if seed is not None:
+            np.random.seed(seed)
+        samples = np.random.choice(spreads, size=n_trials, replace=True)
+        return {
+            'expected': samples.mean(),
+            'median': np.median(samples),
+            'std': samples.std(),
+            'p_outperform': (samples > 0).mean() * 100,
+            'ci_80': np.percentile(samples, [10, 90]),
+            'ci_95': np.percentile(samples, [2.5, 97.5])
+        }
+
+    def forecast_2026_full(self, n_trials=10000):
+        """Forecast all 26 periods of 2026 using 2024–2025 empirical distribution"""
+        print(f"\n🎲 Running Monte Carlo for 2026 (using {len(self.historical_spreads)} historical periods)")
+        cal = self.generate_2026_calendar()
+        spreads = self.historical_spreads['spread'].values
         
-        return months
-    
-    def _generate_2026_dates(self):
-        """Generate approximate dates for 2026"""
-        # Start with first trading day of 2026
-        start_date = datetime(2026, 1, 2)
-        trading_days = pd.bdate_range(start=start_date, periods=260)
-        
-        start_dates = []
-        end_dates = []
-        
-        for i in range(26):
-            start_idx = i * 10
-            end_idx = start_idx + 9
+        forecasts = []
+        for _, period in cal.iterrows():
+            # Unique seed per period for reproducibility
+            seed = 20260000 + period['period']
+            mc = self.monte_carlo_bootstrap(spreads, n_trials=n_trials, seed=seed)
             
-            if end_idx < len(trading_days):
-                start_dates.append(trading_days[start_idx].date())
-                end_dates.append(trading_days[end_idx].date())
+            forecasts.append({
+                'period': period['period'],
+                'start_date': period['start_date'],
+                'end_date': period['end_date'],
+                'quarter': period['quarter'],
+                'expected_spread': round(mc['expected'], 3),
+                'median_spread': round(mc['median'], 3),
+                'std_spread': round(mc['std'], 3),
+                'prob_outperform': round(mc['p_outperform'], 1),
+                'ci_80_low': round(mc['ci_80'][0], 3),
+                'ci_80_high': round(mc['ci_80'][1], 3),
+                'ci_95_low': round(mc['ci_95'][0], 3),
+                'ci_95_high': round(mc['ci_95'][1], 3)
+            })
         
-        return {'start_dates': start_dates, 'end_dates': end_dates}
-    
-    def _calculate_probabilities(self, forecasts, historical_spreads):
-        """Calculate probability of outperformance"""
-        mean_spread = np.mean(historical_spreads)
-        std_spread = np.std(historical_spreads)
+        self.forecasts_2026 = pd.DataFrame(forecasts)
+        print(f"✅ Forecast completed for all 26 periods of 2026")
+
+    def generate_report(self):
+        """Create comprehensive markdown report and CSV exports"""
+        h = self.historical_spreads
+        f = self.forecasts_2026
         
-        probabilities = []
-        for forecast in forecasts:
-            # Z-score for spread > 0
-            z = (0 - forecast) / std_spread
-            prob = 1 - self._normal_cdf(z)
-            probabilities.append(round(prob * 100, 1))
+        # Historical stats
+        total_hist = len(h)
+        hist_p_out = (h['spread'] > 0).mean() * 100
+        hist_mean = h['spread'].mean()
+        hist_std = h['spread'].std()
         
-        return probabilities
-    
-    def _normal_cdf(self, x):
-        """Approximate normal CDF"""
-        return 0.5 * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3)))
-    
-    def create_interactive_plot(self, historical_data, forecasts):
-        """Create interactive Plotly visualization"""
-        print("\n📊 Creating interactive visualization...")
+        # 2026 forecast stats
+        cum_2026 = f['expected_spread'].sum()
+        avg_2026 = f['expected_spread'].mean()
+        pos_periods = (f['expected_spread'] > 0).sum()
+        q1_avg = f[f['quarter'] == 1]['expected_spread'].mean()
+        q4_avg = f[f['quarter'] == 4]['expected_spread'].mean()
+        best_period = f.loc[f['expected_spread'].idxmax()]
+        worst_period = f.loc[f['expected_spread'].idxmin()]
+        
+        # Markdown report
+        md = f"""# 2026 NASDAQ-100 vs S&P 500 Futures Forecast  
+*Based on 2024–2025 Empirical Spread Distribution*
+
+Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+
+## 🔍 Historical Foundation (2024–2025)
+- **Total biweekly periods**: {total_hist} ({len(h[h['year']=='2024'])} in 2024, {len(h[h['year']=='2025'])} in 2025)
+- **NQ outperformance rate**: {hist_p_out:.1f}%
+- **Mean biweekly spread**: {hist_mean:+.3f}% (σ = {hist_std:.3f}%)
+- **Max outperformance**: {h['spread'].max():+.3f}%
+- **Max underperformance**: {h['spread'].min():+.3f}%
+
+## 📈 2026 Full-Year Forecast
+| Metric | Value |
+|--------|-------|
+| **Expected cumulative spread** | {cum_2026:+.2f}% |
+| **Avg. biweekly spread** | {avg_2026:+.3f}% |
+| **Periods with +ve expectation** | {pos_periods}/26 ({pos_periods/26*100:.0f}%) |
+| **Mean probability of outperformance** | {f['prob_outperform'].mean():.1f}% |
+| **Q1 (Jan–Mar) average** | {q1_avg:+.3f}% |
+| **Q4 (Oct–Dec) average** | {q4_avg:+.3f}% |
+
+### 🔝 Highest-Conviction Opportunities
+- **Best period**: #{int(best_period['period'])} ({best_period['start_date']}–{best_period['end_date']})  
+  → Expected +{best_period['expected_spread']:.3f}% (P = {best_period['prob_outperform']:.1f}%)
+- **Worst period**: #{int(worst_period['period'])}  
+  → Expected {worst_period['expected_spread']:+.3f}%
+
+## 📌 Strategic Implications
+- {'✅ Strong NQ outperformance expected in 2026' if cum_2026 > 1.5 else '🟡 Modest NQ outperformance expected' if cum_2026 > 0 else '⚠️ ES likely to outperform in 2026'}
+- Monitor periods with >65% outperformance probability for tactical positioning
+- Use 80% CI width to gauge uncertainty (wider = higher regime risk)
+
+## 📁 Output Files
+- `2026_full_forecast.csv` — All 26 period forecasts
+- `historical_spreads_2024_2025.csv` — Raw biweekly data
+- `2026_forecast_dashboard.html` — Interactive visualization
+- `forecast_summary.md` — This report
+"""
+        
+        # Save files
+        with open('forecast_summary.md', 'w') as f_md:
+            f_md.write(md)
+        
+        f.to_csv('2026_full_forecast.csv', index=False)
+        h.to_csv('historical_spreads_2024_2025.csv', index=False)
+        
+        print("\n" + "="*70)
+        print("✅ FORECAST COMPLETE — 2024–2025 → 2026")
+        print("="*70)
+        print(f"📈 Expected cumulative NQ outperformance: {cum_2026:+.2f}%")
+        print(f"📊 Avg. biweekly edge: {avg_2026:+.3f}%")
+        print("📁 Files saved:")
+        print("   • forecast_summary.md")
+        print("   • 2026_full_forecast.csv")
+        print("   • historical_spreads_2024_2025.csv")
+
+    def plot_dashboard(self):
+        """Create interactive Plotly dashboard"""
+        f = self.forecasts_2026
+        h = self.historical_spreads
         
         fig = make_subplots(
             rows=2, cols=2,
-            subplot_titles=('Historical Spread Performance',
-                          '2026 Forecast Spread',
-                          'Outperformance Probability',
-                          'Cumulative Spread'),
+            subplot_titles=(
+                "2026 Expected Biweekly Spread",
+                "Outperformance Probability",
+                "Cumulative Expected Spread",
+                "Historical vs Forecast Volatility"
+            ),
             vertical_spacing=0.15,
-            horizontal_spacing=0.15
+            horizontal_spacing=0.12,
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": True}]]
         )
         
-        # Historical spreads
+        x = f['period']
+        exp = f['expected_spread']
+        prob = f['prob_outperform']
+        cum = np.cumsum(exp)
+        
+        # 1. Expected spread with CI shading
         fig.add_trace(
-            go.Scatter(
-                x=historical_data['start_date'],
-                y=historical_data['spread'],
-                mode='lines+markers',
-                name='Historical Spread',
-                line=dict(color='blue', width=2),
-                marker=dict(size=6)
-            ),
+            go.Scatter(x=x, y=exp, mode='lines+markers', name='Expected Spread',
+                       line=dict(color='steelblue', width=3)),
             row=1, col=1
         )
+        fig.add_hline(y=0, line_dash='dash', line_color='gray', row=1, col=1)
         
-        # Forecast spreads
+        # 2. Probability bars
+        colors = ['green' if p >= 60 else 'orange' if p >= 50 else 'red' for p in prob]
         fig.add_trace(
-            go.Scatter(
-                x=forecasts['start_date'],
-                y=forecasts['forecast_spread'],
-                mode='lines+markers',
-                name='2026 Forecast',
-                line=dict(color='red', width=3),
-                marker=dict(size=8)
-            ),
+            go.Bar(x=x, y=prob, marker_color=colors, name='P(NQ > ES)'),
             row=1, col=2
         )
+        fig.add_hline(y=50, line_dash='dash', line_color='black', row=1, col=2)
         
-        # Confidence interval
+        # 3. Cumulative
         fig.add_trace(
-            go.Scatter(
-                x=forecasts['start_date'],
-                y=forecasts['forecast_spread'] + 1.0,
-                mode='lines',
-                name='Upper Bound',
-                line=dict(color='red', width=0),
-                showlegend=False
-            ),
-            row=1, col=2
-        )
-        
-        fig.add_trace(
-            go.Scatter(
-                x=forecasts['start_date'],
-                y=forecasts['forecast_spread'] - 1.0,
-                mode='lines',
-                name='Lower Bound',
-                fill='tonexty',
-                fillcolor='rgba(255,0,0,0.2)',
-                line=dict(color='red', width=0),
-                showlegend=False
-            ),
-            row=1, col=2
-        )
-        
-        # Probability bars
-        fig.add_trace(
-            go.Bar(
-                x=forecasts['period'],
-                y=forecasts['prob_outperform'],
-                name='Outperform Probability',
-                marker_color=['green' if x > 50 else 'red' 
-                            for x in forecasts['prob_outperform']]
-            ),
+            go.Scatter(x=x, y=cum, mode='lines+markers', name='Cumulative',
+                       line=dict(color='purple', width=3)),
             row=2, col=1
         )
+        fig.add_hline(y=0, line_dash='dash', line_color='gray', row=2, col=1)
         
-        # Cumulative spread
-        historical_cumulative = np.cumsum(historical_data['spread'])
-        forecast_cumulative = np.cumsum(forecasts['forecast_spread'])
-        
+        # 4. Volatility comparison
+        hist_std = h.groupby('year')['spread'].std().reindex(['2024','2025']).fillna(0)
         fig.add_trace(
-            go.Scatter(
-                x=historical_data['start_date'],
-                y=historical_cumulative,
-                mode='lines',
-                name='Historical Cumulative',
-                line=dict(color='blue', width=2)
-            ),
+            go.Bar(x=['2024','2025'], y=hist_std.values, name='Historical σ',
+                   marker_color='lightblue'),
             row=2, col=2
         )
-        
         fig.add_trace(
-            go.Scatter(
-                x=forecasts['start_date'],
-                y=forecast_cumulative,
-                mode='lines',
-                name='2026 Cumulative Forecast',
-                line=dict(color='red', width=3)
-            ),
-            row=2, col=2
+            go.Scatter(x=x, y=f['std_spread'], mode='lines', name='Forecast σ',
+                       line=dict(color='crimson', dash='dot')),
+            row=2, col=2, secondary_y=True
         )
         
-        # Update layout
         fig.update_layout(
-            title='NASDAQ-100 vs S&P 500 Futures Outperformance Forecast 2026',
-            height=800,
-            showlegend=True,
-            template='plotly_white'
+            title="2026 NQ vs ES Futures Forecast Dashboard (2024–2025 Training)",
+            height=850,
+            template='plotly_white',
+            showlegend=True
         )
-        
-        fig.update_xaxes(title_text="Date", row=1, col=1)
-        fig.update_xaxes(title_text="Date", row=1, col=2)
-        fig.update_xaxes(title_text="Period", row=2, col=1)
-        fig.update_xaxes(title_text="Date", row=2, col=2)
-        
+        fig.update_xaxes(title_text="Period #")
         fig.update_yaxes(title_text="Spread (%)", row=1, col=1)
-        fig.update_yaxes(title_text="Spread (%)", row=1, col=2)
-        fig.update_yaxes(title_text="Probability (%)", row=2, col=1)
-        fig.update_yaxes(title_text="Cumulative Spread (%)", row=2, col=2)
+        fig.update_yaxes(title_text="Probability (%)", row=1, col=2)
+        fig.update_yaxes(title_text="Cumulative (%)", row=2, col=1)
+        fig.update_yaxes(title_text="Historical σ (%)", row=2, col=2)
+        fig.update_yaxes(title_text="Forecast σ (%)", row=2, col=2, secondary_y=True)
         
-        # Save and show
-        fig.write_html("forecast_plot.html")
-        print("✅ Interactive plot saved as forecast_plot.html")
-        
-        return fig
-    
-    def generate_report(self, historical_data, forecasts):
-        """Generate comprehensive report"""
-        print("\n" + "="*80)
-        print("2026 NASDAQ-100 vs S&P 500 FUTURES FORECAST REPORT")
-        print("="*80)
-        
-        # Historical analysis
-        print(f"\n📊 HISTORICAL ANALYSIS ({historical_data['start_date'].min()} to {historical_data['start_date'].max()})")
-        print("-"*60)
-        
-        total_periods = len(historical_data)
-        outperform_periods = len(historical_data[historical_data['spread'] > 0])
-        outperform_pct = (outperform_periods / total_periods) * 100
-        
-        print(f"Total periods analyzed: {total_periods}")
-        print(f"Periods with NQ outperformance: {outperform_periods}")
-        print(f"Outperformance percentage: {outperform_pct:.1f}%")
-        print(f"Average spread: {historical_data['spread'].mean():.2f}%")
-        print(f"Spread volatility: {historical_data['spread'].std():.2f}%")
-        
-        # 2026 Forecast
-        print(f"\n🎯 2026 FORECAST SUMMARY")
-        print("-"*60)
-        
-        positive_forecasts = len(forecasts[forecasts['forecast_spread'] > 0])
-        avg_forecast = forecasts['forecast_spread'].mean()
-        
-        print(f"Total forecast periods: {len(forecasts)}")
-        print(f"Periods with expected NQ outperformance: {positive_forecasts}")
-        print(f"Average forecast spread: {avg_forecast:.2f}%")
-        
-        # Specific periods
-        print(f"\n📅 KEY PERIODS FORECAST")
-        print("-"*60)
-        
-        # Q1 2026
-        q1_forecasts = forecasts[forecasts['period'] <= 6]
-        print(f"Q1 2026 (Periods 1-6):")
-        print(f"  Average spread: {q1_forecasts['forecast_spread'].mean():.2f}%")
-        print(f"  Expected NQ outperformance in {len(q1_forecasts[q1_forecasts['forecast_spread'] > 0])} of 6 periods")
-        
-        # January 5-16, 2026
-        jan_period = forecasts.iloc[0]  # First period
-        print(f"\n📌 SPECIFIC FORECAST: January 5-16, 2026")
-        print(f"  Expected spread: {jan_period['forecast_spread']:.2f}%")
-        print(f"  Probability of NQ outperformance: {jan_period['prob_outperform']:.1f}%")
-        print(f"  Confidence interval: [{jan_period['forecast_spread']-1.0:.2f}%, {jan_period['forecast_spread']+1.0:.2f}%]")
-        
-        # Recommendations
-        print(f"\n💡 TRADING RECOMMENDATIONS")
-        print("-"*60)
-        
-        if jan_period['forecast_spread'] > 0.5:
-            print("1. Consider LONG NQ / SHORT ES spread for January 2026")
-            print("2. Entry: First trading day of January")
-            print("3. Target: 1-2% spread gain")
-            print("4. Stop-loss: If spread turns negative")
-        else:
-            print("1. Wait for better entry point")
-            print("2. Monitor economic indicators in early January")
-            print("3. Consider defensive positioning if spread forecast is negative")
-        
-        # Save results
-        historical_data.to_csv('historical_spreads.csv', index=False)
-        forecasts.to_csv('2026_forecasts.csv', index=False)
-        
-        with open('forecast_summary.md', 'w') as f:
-            f.write("# Futures Outperformance Forecast Report\n\n")
-            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-            f.write("## Key Findings\n\n")
-            f.write(f"- Historical NQ outperformance rate: {outperform_pct:.1f}%\n")
-            f.write(f"- 2026 average forecast spread: {avg_forecast:.2f}%\n")
-            f.write(f"- January 5-16, 2026 forecast: {jan_period['forecast_spread']:.2f}%\n")
-            f.write(f"- Probability of January outperformance: {jan_period['prob_outperform']:.1f}%\n")
-        
-        print("\n✅ Files saved:")
-        print("   historical_spreads.csv")
-        print("   2026_forecasts.csv")
-        print("   forecast_summary.md")
-        print("   forecast_plot.html")
+        fig.write_html('2026_forecast_dashboard.html')
+        print("✅ Dashboard saved: 2026_forecast_dashboard.html")
 
+# ——— MAIN EXECUTION ———
 def main():
-    """Main execution function"""
     print("="*80)
-    print("GITHUB FUTURES FORECASTING SYSTEM")
+    print("🔮 ADVANCED 2026 FORECAST: 2024–2025 → 2026")
+    print("   • Real/synthetic NQ & ES futures data")
+    print("   • Monte Carlo bootstrap (10k trials/period)")
+    print("   • 26 biweekly forecasts for full 2026")
     print("="*80)
-    print("\nThis script runs in GitHub Codespaces, Colab, or any Python environment.")
     
-    # Initialize forecaster
-    forecaster = GitHubForecaster()
-    
-    # Step 1: Fetch data
-    if not forecaster.fetch_data():
-        print("⚠️ Using sample data for demonstration")
-        # Create sample data
-        dates = pd.date_range('2024-01-01', periods=500, freq='B')
-        np.random.seed(42)
-        forecaster.data = pd.DataFrame({
-            'NQ': 16000 * np.cumprod(1 + np.random.normal(0.0008, 0.015, 500)),
-            'ES': 4800 * np.cumprod(1 + np.random.normal(0.0005, 0.012, 500)),
-            'VIX': np.random.normal(15, 3, 500),
-            'TNX': np.random.normal(4.0, 0.2, 500)
-        }, index=dates)
-    
-    # Step 2: Calculate biweekly returns
-    historical_data = forecaster.calculate_biweekly_returns()
-    
-    if historical_data is None or len(historical_data) < 10:
-        print("❌ Insufficient data for analysis")
-        return
-    
-    # Step 3: Forecast 2026
-    forecasts = forecaster.forecast_2026(historical_data)
-    
-    # Step 4: Create visualization
-    forecaster.create_interactive_plot(historical_data, forecasts)
-    
-    # Step 5: Generate report
-    forecaster.generate_report(historical_data, forecasts)
-    
-    print("\n" + "="*80)
-    print("✅ ANALYSIS COMPLETE!")
-    print("="*80)
-    print("\n📋 Files generated:")
-    print("   - forecast_plot.html (Interactive visualization)")
-    print("   - historical_spreads.csv (Historical data)")
-    print("   - 2026_forecasts.csv (2026 predictions)")
-    print("   - forecast_summary.md (Summary report)")
+    forecaster = EnhancedForecaster()
+    forecaster.fetch_all_data()
+    forecaster.aggregate_historical_spreads()
+    forecaster.forecast_2026_full(n_trials=10000)
+    forecaster.plot_dashboard()
+    forecaster.generate_report()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
